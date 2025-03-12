@@ -303,7 +303,7 @@ class scCausalVIModule(BaseModuleClass):
                 if treat_name is None:
                     raise ValueError(f'Treatment label {t_lbl} not found in condition2int')
 
-                mask = (condition_label == t_lbl).squeeze()
+                mask = (condition_label == t_lbl).squeeze(dim=-1)
                 x_sub = x_[mask]
                 batch_sub = batch_index[mask]
 
@@ -351,7 +351,7 @@ class scCausalVIModule(BaseModuleClass):
     ) -> Dict[str, Dict[str, torch.Tensor]]:
 
         # Inference of data
-        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze()
+        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze(dim=-1)
 
         x_control = x[ctrl_mask]
         condition_control = condition_label[ctrl_mask]
@@ -383,7 +383,7 @@ class scCausalVIModule(BaseModuleClass):
         batch_index = tensors[SCCAUSALVI_REGISTRY_KEYS. BATCH_KEY]
         condition_label = tensors[SCCAUSALVI_REGISTRY_KEYS.CONDITION_KEY]
 
-        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze()
+        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze(dim=-1)
         n_cells = x.shape[0]
 
         z_bg_merged = torch.zeros((n_cells, self.n_background_latent), device=x.device)
@@ -538,7 +538,7 @@ class scCausalVIModule(BaseModuleClass):
         batch_index = tensors[SCCAUSALVI_REGISTRY_KEYS.BATCH_KEY]
         condition_label = tensors[SCCAUSALVI_REGISTRY_KEYS.CONDITION_KEY]
 
-        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze()
+        ctrl_mask = (condition_label == self.condition2int[self.control]).squeeze(dim=-1)
         x_ctrl = x[ctrl_mask]
         batch_ctrl = batch_index[ctrl_mask]
         ctrl_inference = inference_outputs['control']
@@ -601,7 +601,7 @@ class scCausalVIModule(BaseModuleClass):
             # each treatment data, to align each baseline states of treated samples with the control population
             unique_treats = cond_treat.unique()
             for t_lbl in unique_treats:
-                treat_submask = (cond_treat == t_lbl).squeeze()
+                treat_submask = (cond_treat == t_lbl).squeeze(dim=-1)
                 z_bg_t_sub = z_bg_treatment_all[treat_submask]
                 # MMD between all control cells and the subset of treatment cells of this label
                 loss_mmd += self.mmd_loss(z_bg_control, z_bg_t_sub)

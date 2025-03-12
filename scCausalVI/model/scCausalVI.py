@@ -205,7 +205,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             unique_labels = label_index.unique()
 
             for lbl in unique_labels:
-                mask = (label_index == lbl).squeeze().cpu()
+                mask = (label_index == lbl).squeeze(dim=-1).cpu()
                 x_sub = x[mask]
                 batch_sub = batch_index[mask]
 
@@ -309,7 +309,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             unique_labels = label_index.unique()
 
             for lbl in unique_labels:
-                mask = (label_index == lbl).squeeze().cpu()
+                mask = (label_index == lbl).squeeze(dim=-1).cpu()
                 x_sub = x[mask]
                 batch_sub = batch_index[mask]
 
@@ -428,7 +428,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             latent_library_tensor = torch.zeros([x.shape[0], 1], device=self.module.device)
 
             for lbl in unique_labels:
-                mask = (label_index == lbl).squeeze()
+                mask = (label_index == lbl).squeeze(dim=-1)
                 x_sub = x[mask]
                 batch_sub = batch_index[mask]
 
@@ -559,7 +559,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             predicted_label = torch.zeros([x.shape[0], 1], device=self.module.device)
 
             for lbl in unique_labels:
-                mask = (label_index == lbl).squeeze()
+                mask = (label_index == lbl).squeeze(dim=-1)
                 x_sub = x[mask]
                 batch_sub = batch_index[mask]
 
