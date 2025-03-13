@@ -662,7 +662,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         torch.manual_seed(0)
         expression = ZeroInflatedNegativeBinomial(
             mu=torch.cat(px_rate_list, dim=0),
-            theta=torch.cat(px_r_list, dim=0),
+            theta=px_r_tensor,
             zi_logits=torch.cat(px_dropout_list, dim=0),
         ).sample()
 
