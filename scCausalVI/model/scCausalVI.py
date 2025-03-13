@@ -534,6 +534,9 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         )
 
         exprs = []
+        px_rate_list = []
+        px_r_list = []
+        px_dropout_list = []
         predicted_batch = []
         predicted_labels = []
 
@@ -648,22 +651,26 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             if px_r_tensor is None:
                 px_r_tensor = torch.exp(self.module.px_r)
 
-            # Sample count data from distribution
-            torch.manual_seed(0)
-            count_tensor = ZeroInflatedNegativeBinomial(
-                mu=px_rate_tensor, theta=px_r_tensor, zi_logits=px_dropout_tensor
-            ).sample()
+            px_rate_list.append(px_rate_tensor.detach().cpu())
+            px_r_list.append(px_r_tensor.detach().cpu())
+            px_dropout_list.append(px_dropout_tensor.detach().cpu())
 
-            exprs.append(count_tensor.detach().cpu())
             predicted_labels.append(predicted_label.detach().cpu())
             predicted_batch.append(target_batch_index.detach().cpu())
 
-        expression = torch.cat(exprs, dim=0).numpy()
+        # Sample count data from distribution
+        torch.manual_seed(0)
+        expression = ZeroInflatedNegativeBinomial(
+            mu=torch.cat(px_rate_list, dim=0),
+            theta=torch.cat(px_r_list, dim=0),
+            zi_logits=torch.cat(px_dropout_list, dim=0),
+        ).sample()
+
         predicted_condition = torch.cat(predicted_labels, dim=0).numpy()
         predicted_condition_name = [label_to_name.get(int(c), None) for c in predicted_condition]
         predicted_batch_all = torch.cat(predicted_batch, dim=0).numpy()
 
-        adata_out = AnnData(X=expression, obs=adata.obs.copy(), var=adata.var.copy())
+        adata_out = AnnData(X=expression.numpy(), obs=adata.obs.copy(), var=adata.var.copy())
         adata_out.obs['predicted_condition'] = predicted_condition_name
         adata_out.obs['predicted_batch'] = predicted_batch_all
         return adata_out
