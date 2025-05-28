@@ -712,7 +712,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         if treatment_condition not in self.module.condition2int.keys() or control_condition not in self.module.condition2int.keys():
             raise ValueError("treatment_condition or control_condition is not valid conditions.")
 
-        adata_tm = adata[adata.obs[SCCAUSALVI_REGISTRY_KEYS.CONDITION_KEY] == self.module.condition2int[treatment_condition]].copy()
+        adata_tm = adata[adata.obs['_scvi_condition'] == self.module.condition2int[treatment_condition]].copy()
         adata_tm.obs['is_real'] = 'real tm'
 
         adata_cross = self.get_count_expression_cross_condition(
