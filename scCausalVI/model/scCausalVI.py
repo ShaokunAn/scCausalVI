@@ -3,8 +3,13 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 import torch
+import scanpy as sc
+import anndata as ad
 from anndata import AnnData
+from statsmodels.stats.multitest import multipletests
+
 from numpy import ndarray
+import pandas as pd
 from .base import SCCAUSALVI_REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
@@ -674,3 +679,91 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         adata_out.obs['predicted_condition'] = predicted_condition_name
         adata_out.obs['predicted_batch'] = predicted_batch_all
         return adata_out
+
+    @torch.no_grad()
+    def responsive_cells(
+            self,
+            adata: AnnData,
+            treatment_condition: str,
+            control_condition: str,
+            batch_size: Optional[int] = None,
+            responsive_label: Optional[str] = 'if_responsive',
+    ):
+        """
+        Identify responsive cells of specified condition in contrast to control condition.
+        It is performed by quantifying the significance of treatment-induced difference
+        ||\hat x_cross_contidion(control_condition) for cells of treatment condition - x_treatment||
+        against null distribution representing uncertainty of generative model
+        ||\hat x_reconstructed_treatment - x_real_treatment||.
+
+        Args:
+            adata: AnnData to predict.
+            treatment_condition: Specified condition to identify responsive cells.
+            control_condition: Control group to compare against.
+            batch_size: Batch size for data loading.
+            responsive_label: Column names in adata.obs to store labels for responsive cells.
+
+        Returns:
+            AnnData with predicted_labels in .obs[responsive_label]. Only cells of treatment_condition is returned.
+        """
+        if treatment_condition == control_condition:
+            raise ValueError("treatment_condition and control_condition should be different.")
+
+        if treatment_condition not in self.module.condition2int.keys() or control_condition not in self.module.condition2int.keys():
+            raise ValueError("treatment_condition or control_condition is not valid conditions.")
+
+        adata_tm = adata[adata.obs[SCCAUSALVI_REGISTRY_KEYS.CONDITION_KEY] == self.module.condition2int[treatment_condition]].copy()
+        adata_tm.obs['is_real'] = 'real tm'
+
+        adata_cross = self.get_count_expression_cross_condition(
+            adata=adata_tm,
+            source_condition=treatment_condition,
+            target_condition=control_condition,
+        )
+
+        sc.pp.normalize_total(adata_cross,)
+        sc.pp.log1p(adata_cross)
+        adata_cross.obs['is_real'] = 'tm -> ctrl'
+
+        adata_recon = self.get_count_expression(adata_tm)
+
+        sc.pp.normalize_total(adata_recon,)
+        sc.pp.log1p(adata_recon)
+        adata_recon.obs['is_real'] = 'tm -> tm'
+
+        stim_real_pred = ad.concat([adata_tm, adata_recon, adata_cross])
+
+        sc.pp.pca(stim_real_pred, n_comps=20)
+
+        diff_null = stim_real_pred[stim_real_pred.obs['is_real'] == "real tm"].obsm['X_pca'] - \
+                    stim_real_pred[stim_real_pred.obs['is_real'] == "tm -> tm"].obsm['X_pca']
+
+        l2_norm_null = np.linalg.norm(diff_null, axis=1)
+
+        diff_cf = stim_real_pred[stim_real_pred.obs['is_real'] == "real tm"].obsm['X_pca'] - \
+                  stim_real_pred[stim_real_pred.obs['is_real'] == "tm -> ctrl"].obsm['X_pca']
+        l2_norm_cf = np.linalg.norm(diff_cf, axis=1)
+
+        # Perform hypothesis testing
+        # Use the distribution of null hypothesis (l2_norm_null) to test the significance of l2_norm_cf
+        n = len(diff_null)
+        p_values = []
+        for l in l2_norm_cf:
+            extreme_count = np.sum(l2_norm_null >= l)
+            p_values.append((extreme_count + 1) / (n + 1))
+
+        # Apply multi-testing correction (e.g., Benjamini-Hochberg)
+        reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh')
+
+        significant_cells = np.where(reject)[0]
+
+        df = pd.DataFrame({
+            "diff_null": l2_norm_null,
+            "diff_cf": l2_norm_cf,
+        })
+
+        adata_tm.obs['-log p values'] = -np.log(pvals_corrected + 1)
+        adata_tm.obs[responsive_label] = 'False'
+        adata_tm.obs[responsive_label][significant_cells] = 'True'
+
+        return adata_tm
