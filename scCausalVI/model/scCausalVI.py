@@ -731,10 +731,6 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         sc.pp.log1p(adata_recon)
         adata_recon.obs['is_real'] = 'tm -> tm'
 
-        adata_tm.obs_names = [f"{name}_original" for name in adata_tm.obs_names]
-        adata_recon.obs_names = [f"{name}_reconstructed" for name in adata_recon.obs_names]
-        adata_cross.obs_names = [f"{name}_cross_predicted" for name in adata_cross.obs_names]
-
         stim_real_pred = ad.concat([adata_tm, adata_recon, adata_cross])
 
         sc.pp.pca(stim_real_pred, n_comps=20)
