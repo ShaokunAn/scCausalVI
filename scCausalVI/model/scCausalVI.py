@@ -1,16 +1,13 @@
 import logging
 from typing import List, Optional, Sequence
 
-import numpy as np
-import torch
-import scanpy as sc
 import anndata as ad
-from anndata import AnnData
-from statsmodels.stats.multitest import multipletests
-
-from numpy import ndarray
+import numpy as np
 import pandas as pd
-from .base import SCCAUSALVI_REGISTRY_KEYS
+import scanpy as sc
+import torch
+from anndata import AnnData
+from numpy import ndarray
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
     CategoricalJointObsField,
@@ -20,13 +17,15 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.dataloaders import AnnDataLoader
+from scvi.distributions import ZeroInflatedNegativeBinomial
 from scvi.model._utils import _init_library_size
 from scvi.model.base import BaseModelClass
-from scvi.distributions import ZeroInflatedNegativeBinomial
+from statsmodels.stats.multitest import multipletests
 
+from scCausalVI.model.base._utils import _invert_dict
 from scCausalVI.model.base.training_mixin import scCausalVITrainingMixin
 from scCausalVI.module.scCausalVI import scCausalVIModule
-from scCausalVI.model.base._utils import _invert_dict
+from .base import SCCAUSALVI_REGISTRY_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -686,8 +685,9 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             adata: AnnData,
             treatment_condition: str,
             control_condition: str,
-            batch_size: Optional[int] = None,
             responsive_label: Optional[str] = 'if_responsive',
+            multi_test_correction: Optional[bool] = False,
+            target_sum: Optional[float] = 1e4,
     ):
         """
         Identify responsive cells of specified condition in contrast to control condition.
@@ -700,8 +700,11 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             adata: AnnData to predict.
             treatment_condition: Specified condition to identify responsive cells.
             control_condition: Control group to compare against.
-            batch_size: Batch size for data loading.
             responsive_label: Column names in adata.obs to store labels for responsive cells.
+            multi_test_correction: Whether to apply multiple test correction. Default is False.
+                If True, apply Benjamini-Hochberg correction for a more conservative result.
+            target_sum: Target sum of count expression for normalization in scanpy.pp.normalize_total.
+                It should be consistent with the setting when normalizing original data.
 
         Returns:
             AnnData with predicted_labels in .obs[responsive_label]. Only cells of treatment_condition is returned.
@@ -721,13 +724,13 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             target_condition=control_condition,
         )
 
-        sc.pp.normalize_total(adata_cross,)
+        sc.pp.normalize_total(adata_cross, target_sum=target_sum)
         sc.pp.log1p(adata_cross)
         adata_cross.obs['is_real'] = 'tm -> ctrl'
 
         adata_recon = self.get_count_expression(adata_tm)
 
-        sc.pp.normalize_total(adata_recon,)
+        sc.pp.normalize_total(adata_recon, target_sum=target_sum)
         sc.pp.log1p(adata_recon)
         adata_recon.obs['is_real'] = 'tm -> tm'
 
@@ -753,9 +756,12 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             p_values.append((extreme_count + 1) / (n + 1))
 
         # Apply multi-testing correction (e.g., Benjamini-Hochberg)
-        reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-
-        significant_cells = np.where(reject)[0]
+        if multi_test_correction:
+            reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh')
+            significant_cells = np.where(reject)[0]
+        else:
+            pvals_corrected = p_values
+            significant_cells = np.where(np.array(pvals_corrected) < 0.05)[0]
 
         df = pd.DataFrame({
             "diff_null": l2_norm_null,
