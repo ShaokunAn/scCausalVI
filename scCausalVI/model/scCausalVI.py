@@ -760,8 +760,8 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh')
             significant_cells = np.where(reject)[0]
         else:
-            pvals_corrected = p_values
-            significant_cells = np.where(np.array(pvals_corrected) < 0.05)[0]
+            pvals_corrected = np.array(p_values)
+            significant_cells = np.where(pvals_corrected < 0.05)[0]
 
         df = pd.DataFrame({
             "diff_null": l2_norm_null,
