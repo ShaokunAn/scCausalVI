@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="scCausalVI",
-    version='0.0.9',
+    version='0.0.10',
     author="Shaokun An",
     author_email="shan12@bwh.harvard.edu",
     description="A deep causality-aware model for disentangling treatment effects at single-cell resolution "
@@ -20,7 +20,7 @@ setup(
         "scanpy>=1.9.6",
         "torch>=2.0.0",
         "anndata>=0.10.3",
-        "numpy>=1.23.5",
+        "numpy>=1.23.5,<2.0",
         "setuptools>=59.5.0",
         "pandas>=2.1.1",
         "matplotlib>=3.8.1",
