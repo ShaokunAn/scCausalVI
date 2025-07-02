@@ -6,13 +6,13 @@ import torch.nn.functional as F
 from scCausalVI.model.base import SCCAUSALVI_REGISTRY_KEYS
 from scvi.distributions import ZeroInflatedNegativeBinomial
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
-from scvi.nn import DecoderSCVI, Encoder, one_hot
+from scvi.nn import DecoderSCVI, Encoder
 from torch import Tensor
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
 
 from scCausalVI.data.utils import gram_matrix
-
+from .utils import one_hot
 
 class scCausalVIModule(BaseModuleClass):
     """
