@@ -125,11 +125,9 @@ class scCausalVIDataSplitter(DataSplitter):
 
     def val_dataloader(self) -> scCausalDataLoader:
         if np.all([len(val_idx) > 0 for val_idx in self.val_idx_per_group]):
-            print(f"Validation dataloader created with {len(self.val_idx)} samples")
-            print(f"Validation samples per group: {[len(idx) for idx in self.val_idx_per_group]}")
             return self._get_scCausal_dataloader(self.val_idx_per_group)
         else:
-            raise ValueError('No validation data found.')
+            pass
             # pass
 
     def test_dataloader(self) -> scCausalDataLoader:
