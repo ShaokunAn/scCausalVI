@@ -50,7 +50,7 @@ In order to reproduce paper results visit [here](https://github.com/ShaokunAn/sc
 
 ## References
 
-For a detailed explanation of our methods, please refer to our [bioRxiv](https://www.biorxiv.org/content/10.1101/2025.02.02.636136v1) manuscript.
+For a detailed explanation of our methods, please refer to our [cell systems](https://www.cell.com/cell-systems/abstract/S2405-4712(25)00276-5) manuscript.
 
 ## Contact
 
