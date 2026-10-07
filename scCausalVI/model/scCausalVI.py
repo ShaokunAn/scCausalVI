@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Sequence
+from typing import List, Literal, Optional, Sequence
 
 import anndata as ad
 import numpy as np
@@ -20,7 +20,10 @@ from scvi.dataloaders import AnnDataLoader
 from scvi.distributions import ZeroInflatedNegativeBinomial
 from scvi.model._utils import _init_library_size
 from scvi.model.base import BaseModelClass
+from scipy.stats import ttest_1samp
+from sklearn.decomposition import PCA
 from statsmodels.stats.multitest import multipletests
+from torch.distributions import Binomial, Gamma, Poisson
 
 from scCausalVI.model.base._utils import _invert_dict
 from scCausalVI.model.base.training_mixin import scCausalVITrainingMixin
@@ -28,6 +31,42 @@ from scCausalVI.module.scCausalVI import scCausalVIModule
 from .base import SCCAUSALVI_REGISTRY_KEYS
 
 logger = logging.getLogger(__name__)
+
+
+def _coupled_zinb_sample(
+        mu_a: torch.Tensor,
+        mu_b: torch.Tensor,
+        zi_logits_a: torch.Tensor,
+        zi_logits_b: torch.Tensor,
+        theta: torch.Tensor,
+):
+    """
+    Draw a pair of count matrices (x_a, x_b), each exactly ZINB(mu, theta, zi_logits),
+    sharing as much randomness as possible so that x_a - x_b reflects only the difference
+    of the two distributions.
+
+    NB(mu, theta) is Poisson(mu * G) with G ~ Gamma(theta, theta); G is shared. The Poisson
+    parts are coupled by binomial thinning (lower rate) or by adding an independent Poisson
+    increment (higher rate). Zero inflation uses one shared uniform per entry.
+    """
+    theta = theta.expand_as(mu_a)
+    g = Gamma(theta, theta).sample()
+    lam_a, lam_b = mu_a * g, mu_b * g
+    x_a = Poisson(lam_a).sample()
+    keep = torch.where(lam_a > 0, torch.minimum(lam_a, lam_b) / lam_a, torch.zeros_like(lam_a))
+    thinned = Binomial(total_count=x_a, probs=keep.clamp(0, 1)).sample()
+    extra = Poisson((lam_b - lam_a).clamp(min=0)).sample()
+    x_b = torch.where(lam_b <= lam_a, thinned, x_a + extra)
+    u = torch.rand_like(mu_a)
+    x_a = torch.where(u < torch.sigmoid(zi_logits_a), torch.zeros_like(x_a), x_a)
+    x_b = torch.where(u < torch.sigmoid(zi_logits_b), torch.zeros_like(x_b), x_b)
+    return x_a, x_b
+
+
+def _log_normalize(x: torch.Tensor, target_sum: float) -> np.ndarray:
+    """normalize_total(target_sum) + log1p on a dense count tensor."""
+    size = x.sum(dim=1, keepdim=True).clamp(min=1.0)
+    return torch.log1p(x / size * target_sum).cpu().numpy()
 
 
 class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
@@ -688,26 +727,62 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
             responsive_label: Optional[str] = 'if_responsive',
             multi_test_correction: Optional[bool] = False,
             target_sum: Optional[float] = 1e4,
+            method: Literal['coupled', 'legacy'] = 'coupled',
+            n_draws: int = 20,
+            n_comps: int = 20,
+            alpha: float = 0.05,
+            batch_size: Optional[int] = None,
+            seed: Optional[int] = 0,
     ):
         """
         Identify responsive cells of specified condition in contrast to control condition.
-        It is performed by quantifying the significance of treatment-induced difference
-        ||\hat x_cross_contidion(control_condition) for cells of treatment condition - x_treatment||
-        against null distribution representing uncertainty of generative model
-        ||\hat x_reconstructed_treatment - x_real_treatment||.
+
+        For each treated cell, two distances are compared in PCA space of normalized,
+        log-transformed expression:
+        diff_cf   = ||x_real - \\hat x_cross_condition(control_condition)|| (treatment-induced difference) and
+        diff_null = ||x_real - \\hat x_reconstructed||                     (uncertainty of the generative model).
+
+        method='coupled' (default):
+            Each of `n_draws` rounds draws one posterior sample (z_bg, z_te) per cell. The reconstruction
+            is decoded from (z_bg, z_te) and the cross-condition prediction from the same z_bg (with
+            z_te = 0 for the control condition), the same library size and batch. The two count matrices
+            are drawn from their ZINB distributions with shared random numbers, so their difference only
+            reflects the treatment effect, not independent sampling noise. PCA is fitted on observed
+            expression of treated cells only and kept fixed across draws. Per cell,
+            delta = diff_cf - diff_null over the `n_draws` rounds is tested with a one-sided one-sample
+            t-test (H1: E[delta] > 0); cells with p < `alpha` are responsive.
+            Note: the p value reflects model-sampling uncertainty over the draws, not biological
+            replication. Larger `n_draws` gives smaller p values and more responsive cells, so compare
+            responsive fractions only at the same `n_draws`.
+
+        method='legacy':
+            Behaviour of scCausalVI <= 0.0.11. Reconstruction and cross-condition prediction are sampled
+            independently (different z_bg and ZINB draws), and diff_cf of each cell is compared against
+            diff_null of all treated cells (empirical p value). The difference is dominated by sampling
+            noise; kept only for reproducing earlier results.
 
         Args:
             adata: AnnData to predict.
             treatment_condition: Specified condition to identify responsive cells.
             control_condition: Control group to compare against.
             responsive_label: Column names in adata.obs to store labels for responsive cells.
-            multi_test_correction: Whether to apply multiple test correction. Default is False.
-                If True, apply Benjamini-Hochberg correction for a more conservative result.
+            multi_test_correction: Whether to apply Benjamini-Hochberg correction. Default is False.
+                For method='coupled' the p values depend on `n_draws`, so FDR control is not meaningful.
             target_sum: Target sum of count expression for normalization in scanpy.pp.normalize_total.
-                It should be consistent with the setting when normalizing original data.
+                For method='legacy' it should be consistent with the normalization of adata.X, which is
+                used as observed expression. method='coupled' normalizes the registered count layer itself.
+            method: 'coupled' (default) or 'legacy'. See above.
+            n_draws: Number of coupled posterior draws per cell. Only used for method='coupled'.
+            n_comps: Number of principal components.
+            alpha: Significance level for calling responsive cells.
+            batch_size: Minibatch size for data loading. Only used for method='coupled'.
+            seed: Random seed for posterior and count sampling. Only used for method='coupled'.
+                The global torch random state is left unchanged. If None, the current random state is used.
 
         Returns:
-            AnnData with predicted_labels in .obs[responsive_label]. Only cells of treatment_condition is returned.
+            AnnData of cells of treatment_condition with labels in .obs[responsive_label] ('True' / 'False'),
+            .obs['-log p values'], and, for method='coupled', .obs['p_value'], .obs['diff_null'],
+            .obs['diff_cf'] (means over draws) and .obs['delta'] (mean of diff_cf - diff_null).
         """
         if treatment_condition == control_condition:
             raise ValueError("treatment_condition and control_condition should be different.")
@@ -715,9 +790,54 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
         if treatment_condition not in self.module.condition2int.keys() or control_condition not in self.module.condition2int.keys():
             raise ValueError("treatment_condition or control_condition is not valid conditions.")
 
-        adata_tm = adata[adata.obs['_scvi_condition'] == self.module.condition2int[treatment_condition]].copy()
+        if treatment_condition == self.module.control:
+            raise ValueError("treatment_condition should not be the control condition of the model.")
+
+        if method not in ('coupled', 'legacy'):
+            raise ValueError("method should be 'coupled' or 'legacy'.")
+
+        tm_mask = (adata.obs['_scvi_condition'] == self.module.condition2int[treatment_condition]).values
+        adata_tm = adata[tm_mask].copy()
         adata_tm.obs['is_real'] = 'real tm'
 
+        if method == 'legacy':
+            p_values = self._responsive_pvalues_legacy(
+                adata_tm, treatment_condition, control_condition, target_sum, n_comps,
+            )
+        else:
+            p_values, diff_null, diff_cf, delta = self._responsive_pvalues_coupled(
+                adata, np.where(tm_mask)[0], treatment_condition, control_condition,
+                target_sum, n_draws, n_comps, batch_size, seed,
+            )
+            adata_tm.obs['p_value'] = p_values
+            adata_tm.obs['diff_null'] = diff_null
+            adata_tm.obs['diff_cf'] = diff_cf
+            adata_tm.obs['delta'] = delta
+
+        # Apply multi-testing correction (e.g., Benjamini-Hochberg)
+        if multi_test_correction:
+            reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh', alpha=alpha)
+            significant_cells = np.where(reject)[0]
+        else:
+            pvals_corrected = np.asarray(p_values)
+            significant_cells = np.where(pvals_corrected < alpha)[0]
+
+        adata_tm.obs['-log p values'] = -np.log(pvals_corrected + 1)
+        labels = np.full(adata_tm.n_obs, 'False', dtype=object)
+        labels[significant_cells] = 'True'
+        adata_tm.obs[responsive_label] = labels
+
+        return adata_tm
+
+    def _responsive_pvalues_legacy(
+            self,
+            adata_tm: AnnData,
+            treatment_condition: str,
+            control_condition: str,
+            target_sum: float,
+            n_comps: int,
+    ) -> np.ndarray:
+        """Empirical p values of scCausalVI <= 0.0.11 (independent sampling, pooled null)."""
         adata_cross = self.get_count_expression_cross_condition(
             adata=adata_tm,
             source_condition=treatment_condition,
@@ -736,7 +856,7 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
 
         stim_real_pred = ad.concat([adata_tm, adata_recon, adata_cross])
 
-        sc.pp.pca(stim_real_pred, n_comps=20)
+        sc.pp.pca(stim_real_pred, n_comps=n_comps)
 
         diff_null = stim_real_pred[stim_real_pred.obs['is_real'] == "real tm"].obsm['X_pca'] - \
                     stim_real_pred[stim_real_pred.obs['is_real'] == "tm -> tm"].obsm['X_pca']
@@ -747,29 +867,103 @@ class scCausalVIModel(scCausalVITrainingMixin, BaseModelClass):
                   stim_real_pred[stim_real_pred.obs['is_real'] == "tm -> ctrl"].obsm['X_pca']
         l2_norm_cf = np.linalg.norm(diff_cf, axis=1)
 
-        # Perform hypothesis testing
         # Use the distribution of null hypothesis (l2_norm_null) to test the significance of l2_norm_cf
         n = len(diff_null)
         p_values = []
         for l in l2_norm_cf:
             extreme_count = np.sum(l2_norm_null >= l)
             p_values.append((extreme_count + 1) / (n + 1))
+        return np.array(p_values)
 
-        # Apply multi-testing correction (e.g., Benjamini-Hochberg)
-        if multi_test_correction:
-            reject, pvals_corrected, _, _ = multipletests(p_values, method='fdr_bh')
-            significant_cells = np.where(reject)[0]
-        else:
-            pvals_corrected = np.array(p_values)
-            significant_cells = np.where(pvals_corrected < 0.05)[0]
+    def _responsive_pvalues_coupled(
+            self,
+            adata: AnnData,
+            indices: np.ndarray,
+            treatment_condition: str,
+            control_condition: str,
+            target_sum: float,
+            n_draws: int,
+            n_comps: int,
+            batch_size: Optional[int],
+            seed: Optional[int],
+    ):
+        """Per-cell paired test on coupled reconstruction / cross-condition draws."""
+        if n_draws < 2:
+            raise ValueError("n_draws should be at least 2 for the per-cell t-test.")
 
-        df = pd.DataFrame({
-            "diff_null": l2_norm_null,
-            "diff_cf": l2_norm_cf,
-        })
+        adata = self._validate_anndata(adata)
+        data_loader = self._make_data_loader(
+            adata=adata,
+            indices=indices,
+            batch_size=batch_size,
+            shuffle=False,
+            data_loader_class=AnnDataLoader,
+        )
+        self.module.eval()
+        device = self.module.device
 
-        adata_tm.obs['-log p values'] = -np.log(pvals_corrected + 1)
-        adata_tm.obs[responsive_label] = 'False'
-        adata_tm.obs[responsive_label][significant_cells] = 'True'
+        # Fixed projection: PCA fitted on observed expression of treated cells only
+        x_obs = np.concatenate(
+            [_log_normalize(t[SCCAUSALVI_REGISTRY_KEYS.X_KEY].float(), target_sum) for t in data_loader]
+        )
+        pca = PCA(n_components=n_comps, random_state=0 if seed is None else seed)
+        pc_obs = pca.fit_transform(x_obs)
+        del x_obs
 
-        return adata_tm
+        control_idx = self.module.condition2int[self.module.control]
+        target_idx = self.module.condition2int[control_condition]
+        target_te_encoder = None
+        if target_idx != control_idx:
+            target_te_encoder = self.module.treatment_te_encoders[control_condition]
+        theta = torch.exp(self.module.px_r)
+
+        def te_latent(z_t):
+            return torch.softmax(self.module.attention(z_t), dim=-1) * z_t
+
+        d_null = np.zeros((len(indices), n_draws), dtype=np.float32)
+        d_cf = np.zeros((len(indices), n_draws), dtype=np.float32)
+
+        fork_devices = [device] if device.type == 'cuda' else []
+        with torch.random.fork_rng(devices=fork_devices, enabled=seed is not None):
+            if seed is not None:
+                torch.manual_seed(seed)
+            start = 0
+            for tensors in data_loader:
+                x = tensors[SCCAUSALVI_REGISTRY_KEYS.X_KEY].to(device)
+                batch_index = tensors[SCCAUSALVI_REGISTRY_KEYS.BATCH_KEY].to(device)
+                label_index = tensors[SCCAUSALVI_REGISTRY_KEYS.CONDITION_KEY].to(device)
+                stop = start + x.shape[0]
+                pc_x = pc_obs[start:stop]
+
+                for k in range(n_draws):
+                    # One posterior sample (z_bg, z_te) shared by reconstruction and cross-condition prediction
+                    outputs = self.module._generic_inference(
+                        x=x, batch_index=batch_index, condition_label=label_index, src='treatment',
+                    )
+                    z_bg = outputs['z_bg']
+                    if target_te_encoder is None:
+                        z_t_cf = torch.zeros_like(outputs['z_t'])
+                    else:
+                        z_t_cf = te_latent(target_te_encoder(z_bg)[2])
+
+                    latent_rc = torch.cat([z_bg, te_latent(outputs['z_t'])], dim=-1)
+                    latent_cf = torch.cat([z_bg, z_t_cf], dim=-1)
+                    _, _, rate_rc, drop_rc = self.module.decoder(
+                        self.module.dispersion, latent_rc, outputs['library'], batch_index,
+                    )
+                    _, _, rate_cf, drop_cf = self.module.decoder(
+                        self.module.dispersion, latent_cf, outputs['library'], batch_index,
+                    )
+                    x_rc, x_cf = _coupled_zinb_sample(rate_rc, rate_cf, drop_rc, drop_cf, theta)
+
+                    pc_rc = pca.transform(_log_normalize(x_rc, target_sum))
+                    pc_cf = pca.transform(_log_normalize(x_cf, target_sum))
+                    d_null[start:stop, k] = np.linalg.norm(pc_x - pc_rc, axis=1)
+                    d_cf[start:stop, k] = np.linalg.norm(pc_x - pc_cf, axis=1)
+                start = stop
+
+        delta = d_cf - d_null
+        p_values = ttest_1samp(delta, 0.0, axis=1, alternative='greater').pvalue
+        # Zero variance across draws (e.g. no counts): no evidence for a response
+        p_values = np.where(np.isnan(p_values), 1.0, p_values)
+        return p_values, d_null.mean(1), d_cf.mean(1), delta.mean(1)

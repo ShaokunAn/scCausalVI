@@ -308,7 +308,8 @@ class scCausalVIModule(BaseModuleClass):
                 batch_sub = batch_index[mask]
 
                 if self.use_observed_lib_size:
-                    lib_ = torch.log(x_sub.sum(dim=1, keepdim=True) + 1e-8)
+                    # Observed library must use raw counts, consistent with the control branch
+                    lib_ = torch.log(x[mask].sum(dim=1, keepdim=True) + 1e-8)
                     library[mask] = lib_
                 else:
                     qlm, qlv, lib_ = self.l_encoder(x_sub, batch_sub)
