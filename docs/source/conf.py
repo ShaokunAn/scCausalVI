@@ -13,7 +13,7 @@ import sphinx_autodoc_typehints
 project = 'scCausalVI'
 copyright = '2024, ShaokunAn'
 author = 'ShaokunAn'
-release = '0.0.1'
+release = '0.0.12'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
